@@ -1,0 +1,112 @@
+{
+    "os": "Linux-5.19.0-43-generic-x86_64-with-glibc2.35",
+    "python": "3.10.9",
+    "heartbeatAt": "2024-05-05T09:02:55.320586",
+    "startedAt": "2024-05-05T09:02:50.632958",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "config/train_shakespeare_char.py",
+        "--wandb_log=True",
+        "--wandb_project=shakespeare_on_nanogpt"
+    ],
+    "state": "running",
+    "program": "/home/robin/llm/nanoGPT/train.py",
+    "codePathLocal": "train.py",
+    "codePath": "train.py",
+    "git": {
+        "remote": "https://github.com/karpathy/nanoGPT.git",
+        "commit": "325be85d9be8c81b436728a420e85796c57dba7e"
+    },
+    "email": null,
+    "root": "/home/robin/llm/nanoGPT",
+    "host": "robin",
+    "username": "robin",
+    "executable": "/home/robin/anaconda3/envs/llm/bin/python",
+    "cpu_count": 6,
+    "cpu_count_logical": 12,
+    "cpu_freq": {
+        "current": 1708.7972499999996,
+        "min": 800.0,
+        "max": 4500.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 2000.089,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2002.876,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 1999.746,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2001.367,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2000.366,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 1999.447,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 1999.98,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 1871.391,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 1999.986,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2002.043,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2001.01,
+            "min": 800.0,
+            "max": 4500.0
+        },
+        {
+            "current": 2000.009,
+            "min": 800.0,
+            "max": 4500.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 136.44643783569336,
+            "used": 41.836814880371094
+        }
+    },
+    "gpu": "NVIDIA GeForce RTX 2060",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA GeForce RTX 2060",
+            "memory_total": 6442450944
+        }
+    ],
+    "memory": {
+        "total": 15.468925476074219
+    }
+}

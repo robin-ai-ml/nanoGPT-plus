@@ -30,6 +30,13 @@ for arg in sys.argv[1:]:
         # assume it's a --key=value argument
         assert arg.startswith('--')
         key, val = arg.split('=')
+
+        '''
+        Splitting Argument: When a = is found, the argument is split into key and val where key would 
+        initially include the -- prefix (e.g., --batch_size).
+        Removing --: key[2:] is then used to remove the -- prefix, converting --batch_size to batch_size, 
+        which can be used to directly reference or modify corresponding variables in the script’s global namespace.
+        '''
         key = key[2:]
         if key in globals():
             try:

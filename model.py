@@ -32,8 +32,14 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
+        '''
+        A linear layer that projects the input embeddings into three different spaces used for queries, keys, and values. 
+        The output dimension is triple the embedding dimension because it needs to produce a separate set of query, key, and value 
+        vectors for each element in the input sequence.
+        '''
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
+        # Another linear layer that projects the concatenated outputs of the attention heads back to the embedding dimension.
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -46,14 +52,44 @@ class CausalSelfAttention(nn.Module):
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
+            '''
+            torch.tril(torch.ones(config.block_size, config.block_size)). The torch.tril function 
+            generates a lower triangular matrix where all elements above the diagonal are zero. 
+            This matrix acts as a mask in the attention mechanism.
+
+            self.register_buffer("bias", mask): Registers the mask as a buffer in the module. 
+            In PyTorch, buffers are tensors that are not considered model parameters; 
+            they do not get updated during training. However, unlike ordinary tensors, 
+            buffers are automatically moved to the device with the model (e.g., GPU) 
+            and are included when the model is saved and loaded.
+
+            The mask is reshaped with .view(1, 1, config.block_size, config.block_size) to ensure 
+            it has the correct dimensions for broadcasting during the attention operations. 
+            This reshaping adds two singleton dimensions at the front, allowing the mask to be applied
+            across batches and heads without manual expansion in the forward pass.
+            '''
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
+
+        '''
+        self.c_attn(x) linearly transforms the input x to generate combined query, key, and value vectors. 
+        This transformation outputs a tensor of shape (B, T, 3 * C)
+        '''
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        '''
+        The tensor is then split into three separate components for queries (q), keys (k), and values (v), 
+        each having a shape of (B, T, C).
+        '''
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        '''
+        The dimensions are then transposed to move the head dimension forward. 
+        This changes the shape to (B, self.n_head, T, C // self.n_head) for each of q, k, and v, 
+        preparing them for batch-wise attention operations across different heads.
+        '''
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -64,11 +100,58 @@ class CausalSelfAttention(nn.Module):
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
+            '''
+            q @ k is intended to perform batch matrix multiplication where queries are multiplied by keys. 
+
+            Dimensions of q and k:
+            In a typical setup for self-attention, the query (q) and key (k) tensors would have dimensions 
+            [batch_size, num_heads, seq_len, head_size]. 
+            Here, seq_len is the length of the sequence (or number of tokens in the sequence), 
+            num_heads is the number of attention heads, and head_size is the size of each head's output.
+
+            Why Transpose Keys (k.transpose(-2, -1)):
+            Before performing the matrix multiplication, the last two dimensions of the keys tensor k need to be transposed. 
+            This changes its shape from [batch_size, num_heads, seq_len, head_size] to [batch_size, num_heads, head_size, seq_len].
+            The reason for this transposition is to align the head_size dimension of the keys with the corresponding dimension 
+            of the queries so that the dot product can be computed along the dimension of head_size, 
+            resulting in a tensor of shape [batch_size, num_heads, seq_len, seq_len]. 
+            This resultant tensor represents attention scores for each query with respect to all keys.
+            '''
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
+            '''
+            The method masked_fill(mask, value) takes two arguments:
+            mask: A boolean tensor where the operation is applied. In this case, the mask is self.bias[:,:,:T,:T] == 0. 
+            This condition identifies positions that should be masked, i.e., where the mask tensor has zeros, 
+            indicating positions in future timesteps that should not influence the current timestep in 
+            a causal (autoregressive) model.
+            value: The value to place in the tensor where the mask condition is True. Here, float('-inf') is used.
+            Setting positions to -inf effectively removes them from consideration in the subsequent softmax operation 
+            because exp(-inf) = 0. Thus, these positions do not contribute to the sum in the softmax denominator, 
+            enforcing the causality in the self-attention.
+            '''
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+
+        '''
+        y.transpose(1, 2):
+        Given that y initially has the shape [B, num_heads, seq_len, head_size] 
+        (assuming it comes directly from the attention calculations involving multiple heads), 
+        this transpose operation changes its shape to [B, seq_len, num_heads, head_size].
+
+        contiguous():
+        Ensures that the tensor y is stored contiguously in memory.
+
+        Function: .view(B, T, C)
+        Purpose: Reshapes y into a new tensor with the specified dimensions [B, T, C], where:
+        B is the batch size,
+        T is the sequence length,
+        C is the new embedding dimension calculated as num_heads * head_size. 
+        This assumes that the original embedding size C was split into num_heads and head_size 
+        during the attention mechanism setup.
+        '''
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -92,6 +175,7 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
+    
 
     def __init__(self, config):
         super().__init__()
@@ -130,6 +214,12 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+
+        '''
+        This layer maps the transformer's output embeddings back to the vocabulary space, 
+        which is essential for tasks like language modeling where the output is a probability 
+        distribution over possible next words in the vocabulary.
+        '''
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -142,6 +232,13 @@ class GPT(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
+                '''
+                The loop through self.named_parameters() specifically looks for parameters named with 'c_proj.weight' 
+                (likely the weights of projection layers within each transformer block) and initializes them with a 
+                scaled normal distribution. The scaling factor 0.02 / math.sqrt(2 * config.n_layer) suggests a variation
+                on the initialization strategy discussed in the GPT-2 paper, designed to keep the variance of outputs 
+                consistent across layers and training depth.
+                '''
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
@@ -184,6 +281,37 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
+
+            '''
+            Logits Reshaping: The logits tensor, possibly having dimensions such as [batch_size, sequence_length, num_classes], 
+            is reshaped to [batch_size * sequence_length, num_classes]. This treats the logits as a simple list of predictions, 
+            each corresponding to a class score vector.
+
+            Targets Flattening: Similarly, targets, which could be of shape [batch_size, sequence_length], 
+            is flattened to [batch_size * sequence_length], aligning each target label with the corresponding logits vector.
+            Loss Calculation: F.cross_entropy then computes the loss by comparing each prediction vector in logits 
+            to its corresponding class label in targets, ignoring any entries where targets equal -1 (e.g., padding).
+
+            Loss Calculation: F.cross_entropy then computes the loss by comparing each prediction vector in logits to 
+            its corresponding class label in targets, ignoring any entries where targets equal -1 (e.g., padding).
+
+            # Simulated logits from a model's output
+            # Shape [batch_size, sequence_length, num_classes]
+            # batch_size = 2, sequence_length = 2, num_classes = 3
+            logits = torch.tensor([
+                                   [[2.0, 1.0, 0.1], [0.1, 1.0, 2.0]], 
+                                   [[1.0, 2.0, 0.1], [0.1, 0.2, 3.0]]
+                                  ])
+
+            # Simulated targets corresponding to the correct class indices
+            # Shape [batch_size, sequence_length]
+            targets = torch.tensor([[0, 2],  # First sample in the batch
+                                    [1, 2]]) # Second sample in the batch
+
+            # Reshape logits and targets to fit the cross_entropy function
+            logits_flat = logits.view(-1, logits.size(-1))  # Flattens to [batch_size * sequence_length, num_classes]
+            targets_flat = targets.view(-1)                 # Flattens to [batch_size * sequence_length]
+            '''
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -292,16 +420,39 @@ class GPT(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
         cfg = self.config
+        '''
+        L: Number of layers in the model.
+        H: Number of attention heads per layer.
+        Q: Dimension of each attention head (computed as the embedding dimension divided by the number of heads).
+        T: Block size or the maximum sequence length the model can handle per input.
+        '''
         L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
+        '''
+        flops_achieved = flops_per_iter * (1.0/dt): Divides the total FLOPS per iteration 
+        by the duration of the iteration (dt, typically measured in seconds) to get the actual FLOPS rate 
+        achieved by the model during training.
+        '''
         flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        '''
+         Compares the achieved FLOPS rate to the theoretical maximum FLOPS rate of the A100 GPU (flops_promised), 
+         resulting in a utilization ratio. This ratio indicates how effectively the model uses the available 
+         computational power of the GPU.
+        '''
+        flops_promised = 4.6e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS   Geforce RTX2060 Mobile 4.6TFLOPS
         mfu = flops_achieved / flops_promised
         return mfu
 
+
+    '''
+    idx: A tensor of shape (b, t), where b is the batch size and t is the sequence length of the initial context.
+    max_new_tokens: The number of new tokens to generate.
+    temperature: A scaling factor for logits to control the randomness in the generation process.
+    top_k: Limits the choices to the top k most likely next tokens to increase the quality of generated text.
+    '''
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
@@ -313,17 +464,74 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
+            '''
+            It's using the model instance as a callable, which internally calls the __call__ method.
+            __call__ manages the forward pass of the network by invoking the forward method 
+            with the provided inputs (idx_cond in your case).
+            the forward() will do inference and return logits, loss
+            '''
             logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
+            '''
+            The logits of the last token are scaled by the temperature. Lower temperatures (closer to 0) 
+            make the distribution sharper (more peaky), leading to less randomness, while higher temperatures 
+            lead to more randomness in the generated tokens.
+
+            Shape: Assume the logits tensor has a shape [batch_size, sequence_length, num_classes]
+            num_classes = vocabulary size
+
+            logits[:, -1, :]: This slices the logits to only select the outputs from the last time step 
+                              of each sequence in the batch. 
+            The colon : selects all elements along that dimension:
+            The first colon : selects all batches.
+            -1 selects the last item in the sequence length dimension, effectively capturing 
+                the logits corresponding to the last output of each sequence.
+            The second colon : selects all elements along the num_classes dimension.
+            '''
             logits = logits[:, -1, :] / temperature
+
             # optionally crop the logits to only the top k options
             if top_k is not None:
+
+
+                '''
+                min(top_k, logits.size(-1)) ensures that the number of elements to take is never more than 
+                the number of classes(vocbulary size) represented in the logits. This is necessary to 
+                handle cases where the top k could be greater than the number of class
+                logits.size(-1) would return the value of num_classes because it's the size of the last dimension
+                '''
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                '''
+                It sets all logits that are not in the top k to negative infinity (-float('Inf')).
+                v[:, [-1]] retrieves the smallest value within the top k logits across each row of the tensor v
+                logits[logits < v[:, [-1]]] creates a mask for all values in logits that are less than 
+                the k-th highest logit (the cutoff value).
+
+                The shape of v could be [batch_size, k], where:
+                batch_size is the number of sequences or data points.
+                k is the number of top logits values kept from each sequence (top k).
+                -1 is used to specify the last item in the dimension. In the context of PyTorch tensors,
+
+                With brackets (v[:, [-1]]): This indexing returns a 2D tensor where the shape is [batch_size, 1]. 
+                Each row in the output corresponds to a single element tensor containing the last of 
+                the top k values from each sequence
+                '''
                 logits[logits < v[:, [-1]]] = -float('Inf')
+
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
+
             # sample from the distribution
+            # A new token is sampled from the softmax probabilities using torch.multinomial, 
+            # which selects from the logits based on their probability weights.
+            '''
+             The torch.multinomial function will return indices of the sampled tokens. 
+             These indices can be used to retrieve the actual tokens from a vocabulary list 
+             or to feed into subsequent steps of a generation loop if the process is 
+             to continue generating more tokens.
+            '''
             idx_next = torch.multinomial(probs, num_samples=1)
+
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
